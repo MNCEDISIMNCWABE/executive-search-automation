@@ -8,11 +8,47 @@ import warnings
 import re
 from typing import List, Optional
 import io
+import hashlib
+import pickle
+import os
+from datetime import datetime, timedelta
 
 # Set up logging and ignore warnings
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# User authentication functions
+def make_hashed_password(password):
+    """Create a hashed version of the password."""
+    return hashlib.sha256(str.encode(password)).hexdigest()
+
+def check_password(stored_password, input_password):
+    """Check if the input password matches the stored password."""
+    return stored_password == make_hashed_password(input_password)
+
+def save_users(users_dict):
+    """Save the users dictionary to a file."""
+    with open('users.pkl', 'wb') as f:
+        pickle.dump(users_dict, f)
+
+def load_users():
+    """Load the users dictionary from a file."""
+    if os.path.exists('users.pkl'):
+        with open('users.pkl', 'rb') as f:
+            return pickle.load(f)
+    else:
+        # Create a default admin user
+        users = {
+            'admin': {
+                'password': make_hashed_password('SPI123@_'),
+                'email': 'admin@example.com',
+                'created_at': datetime.now(),
+                'role': 'admin'
+            }
+        }
+        save_users(users)
+        return users
 
 # API functions
 def search_employees_one_row_per_employee_dedup(
@@ -314,18 +350,167 @@ def to_excel(df):
     processed_data = output.getvalue()
     return processed_data
 
-# Streamlit UI
+# Login management functions
+def login_page():
+    """Display the login page and handle authentication."""
+    st.title("SPI Candidate Search & Match - Login")
+    
+    # Create login and signup tabs
+    login_tab, signup_tab = st.tabs(["Login", "Sign Up"])
+    
+    with login_tab:
+        username = st.text_input("Username", key="login_username")
+        password = st.text_input("Password", type="password", key="login_password")
+        
+        if st.button("Login"):
+            users = load_users()
+            
+            if username in users and check_password(users[username]['password'], password):
+                st.session_state.logged_in = True
+                st.session_state.username = username
+                st.session_state.user_role = users[username].get('role', 'user')
+                st.success(f"Welcome back, {username}!")
+                st.rerun()
+            else:
+                st.error("Invalid username or password")
+    
+    with signup_tab:
+        if st.session_state.get('user_role') == 'admin' or not os.path.exists('users.pkl'):
+            new_username = st.text_input("New Username", key="new_username")
+            new_password = st.text_input("New Password", type="password", key="new_password")
+            confirm_password = st.text_input("Confirm Password", type="password", key="confirm_password")
+            email = st.text_input("Email", key="email")
+            
+            if st.button("Sign Up"):
+                users = load_users()
+                
+                if new_username in users:
+                    st.error("Username already exists")
+                elif new_password != confirm_password:
+                    st.error("Passwords do not match")
+                elif not new_username or not new_password:
+                    st.error("Username and password cannot be empty")
+                else:
+                    users[new_username] = {
+                        'password': make_hashed_password(new_password),
+                        'email': email,
+                        'created_at': datetime.now(),
+                        'role': 'user'
+                    }
+                    save_users(users)
+                    st.success("Account created successfully! You can now login.")
+        else:
+            st.info("User registration is currently managed by administrators.")
+
+def logout():
+    """Handle user logout."""
+    if st.sidebar.button("Logout"):
+        for key in ['logged_in', 'username', 'user_role']:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.rerun()
+
+# Admin dashboard functions
+def admin_dashboard():
+    """Display the admin dashboard for user management."""
+    st.title("Admin Dashboard - User Management")
+    
+    users = load_users()
+    
+    # Display list of users
+    user_df = pd.DataFrame([
+        {
+            'Username': username,
+            'Email': data['email'],
+            'Created At': data['created_at'].strftime('%Y-%m-%d %H:%M:%S'),
+            'Role': data.get('role', 'user')
+        }
+        for username, data in users.items()
+    ])
+    
+    st.dataframe(user_df)
+    
+    # User management sections
+    st.subheader("Add New User")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        new_username = st.text_input("Username", key="admin_new_username")
+        new_password = st.text_input("Password", type="password", key="admin_new_password")
+    
+    with col2:
+        email = st.text_input("Email", key="admin_email")
+        role = st.selectbox("Role", ["user", "admin"], key="admin_role")
+    
+    if st.button("Add User"):
+        if new_username in users:
+            st.error("Username already exists")
+        elif not new_username or not new_password:
+            st.error("Username and password cannot be empty")
+        else:
+            users[new_username] = {
+                'password': make_hashed_password(new_password),
+                'email': email,
+                'created_at': datetime.now(),
+                'role': role
+            }
+            save_users(users)
+            st.success(f"User '{new_username}' added successfully")
+            st.rerun()
+    
+    # Delete user section
+    st.subheader("Delete User")
+    username_to_delete = st.selectbox("Select User to Delete", list(users.keys()))
+    
+    if st.button("Delete User") and username_to_delete:
+        if username_to_delete == st.session_state.username:
+            st.error("You cannot delete your own account while logged in!")
+        else:
+            del users[username_to_delete]
+            save_users(users)
+            st.success(f"User '{username_to_delete}' deleted successfully")
+            st.rerun()
+
+# Main application function
 def main():
     st.set_page_config(page_title="Candidate Search & Match", layout="wide")
     
-    st.title("Candidate Search & Match System")
-    st.markdown("Find and rank the best candidates for your job positions")
-    
-    # Initialize session state
+    # Initialize session state variables
+    if 'logged_in' not in st.session_state:
+        st.session_state.logged_in = False
     if 'search_results' not in st.session_state:
         st.session_state.search_results = None
     if 'ranked_results' not in st.session_state:
         st.session_state.ranked_results = None
+    
+    # Check if users file exists, if not create it with default admin
+    if not os.path.exists('users.pkl'):
+        load_users()
+    
+    # Display sidebar for logged-in users
+    if st.session_state.logged_in:
+        st.sidebar.write(f"Logged in as: **{st.session_state.username}**")
+        st.sidebar.write(f"Role: **{st.session_state.user_role}**")
+        logout()
+        
+        # Admin navigation
+        if st.session_state.user_role == 'admin':
+            pages = ["Candidate Search", "Admin Dashboard"]
+            selected_page = st.sidebar.selectbox("Navigation", pages)
+            
+            if selected_page == "Admin Dashboard":
+                admin_dashboard()
+                return
+    
+    # Display login page if not logged in
+    if not st.session_state.logged_in:
+        login_page()
+        return
+    
+    # Main application - only shown to logged in users
+    st.title("Candidate Search & Match System")
+    st.markdown("Find and rank the best candidates for your job positions")
     
     # Create tabs for different functionalities
     tab1, tab2 = st.tabs(["Search Candidates", "Ranked Results"])
